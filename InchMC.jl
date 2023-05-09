@@ -30,6 +30,7 @@ function Compute_bold(ti, tf, si, sf, sup, t, H0, O, G)
     O: Obserbable
     G: Collection of previously computed Green's functions
     """
+    println(G)
     if si<=sf && sf<=sup
         return Compute_G(sf, si, tf, ti, G)
     elseif sup< si && si<=sf
@@ -68,6 +69,8 @@ function Interpolate_G(si, sf, dt, G)
     iint = floor(Int,si/dt)+1
     fint = floor(Int,sf/dt)+1
 
+    println(G)
+
     di = si-dt*(iint-1)
     df = sf-dt*(fint-1)
 
@@ -75,8 +78,8 @@ function Interpolate_G(si, sf, dt, G)
 end
 
 function Access(G,iint, fint)
-    mint1 = Int(0.5*(fint-1)*fint)
-    mint2 = fint - iint
+    mint1 = Int(0.5*(fint+1)*fint)
+    mint2 = - iint+1
     return G[mint1+mint2]
 end
 
@@ -170,7 +173,7 @@ function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, Nwlk)
     G_stoch = zeros(size(H0)[1],size(H0)[1])
     for i in 1:Nwlk
         # Here 2M random points on the interval ti-tf have to be sampled
-        Xrand = ti+(tf-ti)*rand(Float64, (2*M,1))
+        Xrand = ti.+(tf-ti).*rand(Float64, 2*M)
         Xrand = sort(Xrand)
         G_stoch += Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
     end
@@ -209,7 +212,7 @@ function Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
         G = G * W
     end
     # Last part of the propagations is done separately
-    G = G* Compute_bare(H0, Xrand[-1], tf, t, O)
+    G = G* Compute_bare(H0, last(Xrand), tf, t, O)
     # Now all boring prefactors have to be calculated
     prefact = 1im^L
     for i in 1:L
@@ -217,7 +220,7 @@ function Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
             prefact *=-1
         end
     end
-    return prefact*G*Lbath
+    return prefact*G*LBath
 end
 
 function Compute_bath(Xrand, Bath)
@@ -293,11 +296,11 @@ function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
     # Inchworm requires to store a huge number of Green functions for previous times as resummation is needed in
     # order to avoid sign problem
     N= floor(Int, 2*t/dt)
-    trange = range(0,2*t,N)
+    trange = range(0,2*t,N+1)
     # pre store array of Greens functions
     G = []
     for tf in trange
-        Npar = floor(Int, tf/dt)
+        Npar = floor(Int, tf/dt)+1
         tirange = range(0,tf,Npar)
         for ti in tirange
             # Perform MC sampling using Inchworm algorithm
@@ -351,7 +354,7 @@ function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     # First approximation to the new propagator is gonna be the previous computed Greens function + free propagator
     # Note that given the if statements of the previous function last stored Greens function is always gonna be the
     # right one
-    G_new = G[-1] * Compute_bare(H0, tf-dt, tf, t, O)
+    G_new = last(G) * Compute_bare(H0, tf-dt, tf, t, O)
 
     # Now diagrammatic expansion has to be considered
     for i in 1:M
@@ -377,7 +380,7 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
         # Here 2M random points on the interval ti-tf have to be sampled
         # For the Inchworm procedure, the sampling process is a bit more complex as the sampling must ensure
         # Inchworm properness so at least the first point has to be sampled within the interval [tf-dt,tf]
-        Xrand = zeros(2*M,1)
+        Xrand = zeros(2*M)
         Xrand[1] = tf-dt+dt*rand(Float64)
         for i in 2:2*M
             Xrand[i] = ti+(tf-ti)*rand(Float64)
@@ -391,7 +394,7 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     return V*G_stoch/Nwlk
 end
 
-function Compute_Inchpropagator(ti, tf, dt, tXrand, H0, W, O, G, Bath)
+function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     """
     Compute_Inchpropagator calculates the propagator asociated with a given sample of times on Keldysh contour
     ti,tf: limits of integration
@@ -410,14 +413,14 @@ function Compute_Inchpropagator(ti, tf, dt, tXrand, H0, W, O, G, Bath)
     # First part of the propagations is done separately
     # Now, as here I'm resummating, the Green function is no longer made up of bare propagators but rather on bold
     # ones
-    G = Compute_bold(ti, Xrand[1], tf-dt, t, H0, O, G)
+    G = Compute_bold(ti, tf, ti, Xrand[1], tf-dt, t, H0, O, G)
     G = G * W
     for i in 2:L
-        G = G*Compute_bold(Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G)
+        G = G*Compute_bold(ti, tf, Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G)
         G = G * W
     end
     # Last part of the propagations is done separately
-    G = G* Compute_bold(Xrand[-1], tf, tf-dt, t, H0, O, G)
+    G = G* Compute_bold(ti, tf, last(Xrand), tf, tf-dt, t, H0, O, G)
     # Now all boring prefactors have to be calculated
     prefact = 1im^L
     for i in 1:L
@@ -425,7 +428,7 @@ function Compute_Inchpropagator(ti, tf, dt, tXrand, H0, W, O, G, Bath)
             prefact *=-1
         end
     end
-    return prefact*G*Lbath
+    return prefact*G*LBath
 end
 
 function Compute_bathInch(Xrand, tf, dt, Bath)
@@ -468,5 +471,26 @@ function Is_Inch(Partition, Xrand, dt, tf)
             end
         end
     end
-    return flag
+    if flag==0
+        return false
+    else
+        return true
+    end
 end
+
+t=1
+dt = 0.1
+H0 = zeros(2,2)
+H0[1,1] = 0.5
+H0[1,2] = 0.1
+H0[2,1] = 0.1
+H0[2,2] = -0.5
+W = zeros(2,2)
+W[1,1] = 0.5
+W[2,2] = -0.5
+O = W
+M=1
+Nwlk = 100
+Bath=[1,1,1]
+InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
+
