@@ -30,14 +30,28 @@ function Compute_bold(ti, tf, si, sf, sup, t, H0, O, G)
     O: Obserbable
     G: Collection of previously computed Green's functions
     """
-    println(G)
     if si<=sf && sf<=sup
         return Compute_G(sf, si, tf, ti, G)
     elseif sup< si && si<=sf
-        return Compute_bare(H0, sf, si, t, O)
-    else
-        return Compute_bare(H0, sf, sup, t, O)*Compute_G(sup, si, tf, ti, G)
+        return Compute_bare(H0, si, sf, t, O)
+    else       
+        # In this case no interpolation is needed as the bold propagator is evaluated exactly at a point were it was
+        # computed previously
+        return Compute_bare(H0, sup, sf, t, O)*Compute_Gex(sup, si, G)
     end
+end
+
+function Compute_Gex(sup, si, G)
+    iint = floor(Int, si/dt)+1
+    fint = floor(Int, sup/dt)+1
+    
+    #println(sup)
+    #println(si)
+    #println(Access(G, iint, fint))
+    #println(G)
+    #println(iint)
+    #println(fint)
+    return Access(G,iint,fint)
 end
 
 function Compute_G(sf, si, tf, ti, G)
@@ -68,8 +82,6 @@ function Interpolate_G(si, sf, dt, G)
     # HERE THE INDEXING HAS TO BE FIXED TO A 1D ARRAY
     iint = floor(Int,si/dt)+1
     fint = floor(Int,sf/dt)+1
-
-    println(G)
 
     di = si-dt*(iint-1)
     df = sf-dt*(fint-1)
@@ -299,16 +311,19 @@ function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
     trange = range(0,2*t,N+1)
     # pre store array of Greens functions
     G = []
+    Npar = 0
     for tf in trange
-        Npar = floor(Int, tf/dt)+1
-        tirange = range(0,tf,Npar)
+        Npar = Npar+1
+        tirange = range(tf,0,Npar)
         for ti in tirange
             # Perform MC sampling using Inchworm algorithm
+            println(tf)
+            println(ti)
             G_par = Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
             push!(G, G_par)
         end
     end
-    return G[-1]
+    return last(G)
 end
 
 function Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
@@ -413,14 +428,14 @@ function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     # First part of the propagations is done separately
     # Now, as here I'm resummating, the Green function is no longer made up of bare propagators but rather on bold
     # ones
-    G = Compute_bold(ti, tf, ti, Xrand[1], tf-dt, t, H0, O, G)
-    G = G * W
+    Gp = Compute_bold(ti, tf, ti, Xrand[1], tf-dt, t, H0, O, G)
+    Gp = Gp * W
     for i in 2:L
-        G = G*Compute_bold(ti, tf, Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G)
-        G = G * W
+        Gp = Gp*Compute_bold(ti, tf, Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G)
+        Gp = Gp * W
     end
     # Last part of the propagations is done separately
-    G = G* Compute_bold(ti, tf, last(Xrand), tf, tf-dt, t, H0, O, G)
+    Gp = Gp* Compute_bold(ti, tf, last(Xrand), tf, tf-dt, t, H0, O, G)
     # Now all boring prefactors have to be calculated
     prefact = 1im^L
     for i in 1:L
@@ -428,7 +443,7 @@ function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
             prefact *=-1
         end
     end
-    return prefact*G*LBath
+    return prefact*Gp*LBath
 end
 
 function Compute_bathInch(Xrand, tf, dt, Bath)
@@ -478,6 +493,27 @@ function Is_Inch(Partition, Xrand, dt, tf)
     end
 end
 
+function main(dt, t, H0, W, O, Bath, M, Nwlk)
+    """
+    main functions just assembles everything
+    dt: time step
+    t: total time propagation
+    H0: Unperturbed Hamiltonian
+    W: Perturbation
+    O: observable
+    Bath: bath parameters
+    M: order of diagrammatic expansion
+    Nwlk: Number or walkers
+    """
+    Nsims = floor(Int,t/dt)
+    G = []
+    for i in 1:Nsims
+        push!(G, InchDiag_MC(i*dt,dt,H0,W,O,Bath,M,Nwlk))
+    end
+    return G
+end
+
+
 t=1
 dt = 0.1
 H0 = zeros(2,2)
@@ -492,5 +528,5 @@ O = W
 M=1
 Nwlk = 100
 Bath=[1,1,1]
-InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
+G=main(dt, t, H0, W, O, Bath, M, Nwlk)
 
