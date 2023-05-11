@@ -259,11 +259,24 @@ function Compute_product(Xrand, Bath, Partition, t)
     G = 1
     for i in 1:L
         # time has to be properly fixed
-        t1 = abs(Partition[i][1]-t)
-        t2 = abs(Partition[i][2]-t)
+        t1 = Compute_time(Partition[i][1],t)
+        t2 = Compute_time(Partition[i][2],t)
         G *= B(t1,t2,Bath)
     end
     return G
+end
+
+function Compute_time(s,t)
+    """
+    Compute_time: transform to meaningful time for bath correlation calcualtions
+    s: time on th eun folded contour
+    t: physical time
+    """
+    if s<t
+        return s
+    else
+        return s-t
+    end
 end
 
 function Pairwise_partitions(N)
@@ -393,15 +406,16 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
         # Here 2M random points on the interval ti-tf have to be sampled
         # For the Inchworm procedure, the sampling process is a bit more complex as the sampling must ensure
         # Inchworm properness so at least the first point has to be sampled within the interval [tf-dt,tf]
-        Xrand = ti.+(tf-ti).*rand(Float64,2*M)
-        Xrand = sort(Xrand)
-        if last(Xrand)>tf-dt
-            G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
+        Xrand = zeros(2*M)
+        Xrand[1] = tf-dt+dt*rand(Float64)
+        for i in 2:2*M
+            Xrand[i]= ti+(tf-ti)*rand(Float64)
         end
+        G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
     # CAREFUL perhaps this hypervolume has to be modified since the sampling method has changed
-    V = (tf-ti)^(2*M)/(fac(2*M))
+    V = dt*(tf-ti)^(2*M-1)/(fac(2*M-1))
     return V*G_stoch/Nwlk
 end
 
