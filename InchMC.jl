@@ -2,6 +2,7 @@ using LinearAlgebra
 using QuadGK
 using Random
 using Combinatorics
+using DelimitedFiles
 
 function Compute_bare(H0, si, sf, t, O)
     """
@@ -11,7 +12,7 @@ function Compute_bare(H0, si, sf, t, O)
     t: time of measurement
     O: operator to measure
     """
-    if si<t && sf<t
+    if si<=sf && sf<t
         return exp(-1im*(sf-si)*H0)
     elseif t<=si && si<=sf
         return exp(1im*(sf-si)*H0)
@@ -45,12 +46,6 @@ function Compute_Gex(sup, si, G)
     iint = floor(Int, si/dt)+1
     fint = floor(Int, sup/dt)+1
     
-    #println(sup)
-    #println(si)
-    #println(Access(G, iint, fint))
-    #println(G)
-    #println(iint)
-    #println(fint)
     return Access(G,iint,fint)
 end
 
@@ -215,16 +210,16 @@ function Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
     """
     # Non trivial step is to compute bath part as it scales horribly
     L = size(Xrand)[1]
-    LBath = Compute_bath(Xrand, Bath)
+    LBath = Compute_bath(Xrand, Bath, t)
     # First part of the propagations is done separately
     G = Compute_bare(H0, ti, Xrand[1], t, O)
-    G = G * W
+    G = W * G
     for i in 2:L
-        G = G*Compute_bare(H0, Xrand[i-1], Xrand[i], t, O)
-        G = G * W
+        G = Compute_bare(H0, Xrand[i-1], Xrand[i], t, O) * G
+        G = W * G
     end
     # Last part of the propagations is done separately
-    G = G* Compute_bare(H0, last(Xrand), tf, t, O)
+    G = Compute_bare(H0, last(Xrand), tf, t, O) * G
     # Now all boring prefactors have to be calculated
     prefact = 1im^L
     for i in 1:L
@@ -235,33 +230,38 @@ function Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
     return prefact*G*LBath
 end
 
-function Compute_bath(Xrand, Bath)
+function Compute_bath(Xrand, Bath, t)
     """
     Compute_bath calculates the bath contribution to the propagator
     Xrand: sampled collection of point in Keldysh contour
     Bath: bath parameters (are needed for semi analytical approach)
+    t: physical time
     """
     N = size(Xrand)[1]
     Partition = Pairwise_partitions(N)
     L = size(Partition)[1]
     Bath_influence = 0
     for i in 1:L
-        Bath_influence += Compute_product(Xrand, Bath, Partition[i])
+        Bath_influence += Compute_product(Xrand, Bath, Partition[i], t)
     end
     return Bath_influence
 end
 
-function Compute_product(Xrand, Bath, Partition)
+function Compute_product(Xrand, Bath, Partition, t)
     """
     Compute_product calculates the product of bath correlations for a given partition, semianalitical approach
     Xrand: sampled times on keldysh contour
     Bath: class containing bath parameters
     Partition: individual pair association of the sampled times
+    t: physical time
     """
     L = size(Partition)[1]
     G = 1
     for i in 1:L
-        G *= B(Partition[i][1],Partition[i][2],Bath)
+        # time has to be properly fixed
+        t1 = abs(Partition[i][1]-t)
+        t2 = abs(Partition[i][2]-t)
+        G *= B(t1,t2,Bath)
     end
     return G
 end
@@ -317,8 +317,6 @@ function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
         tirange = range(tf,0,Npar)
         for ti in tirange
             # Perform MC sampling using Inchworm algorithm
-            println(tf)
-            println(ti)
             G_par = Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
             push!(G, G_par)
         end
@@ -369,7 +367,7 @@ function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     # First approximation to the new propagator is gonna be the previous computed Greens function + free propagator
     # Note that given the if statements of the previous function last stored Greens function is always gonna be the
     # right one
-    G_new = last(G) * Compute_bare(H0, tf-dt, tf, t, O)
+    G_new = Compute_bare(H0, tf-dt, tf, t, O) * last(G)
 
     # Now diagrammatic expansion has to be considered
     for i in 1:M
@@ -395,13 +393,11 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
         # Here 2M random points on the interval ti-tf have to be sampled
         # For the Inchworm procedure, the sampling process is a bit more complex as the sampling must ensure
         # Inchworm properness so at least the first point has to be sampled within the interval [tf-dt,tf]
-        Xrand = zeros(2*M)
-        Xrand[1] = tf-dt+dt*rand(Float64)
-        for i in 2:2*M
-            Xrand[i] = ti+(tf-ti)*rand(Float64)
-        end
+        Xrand = ti.+(tf-ti).*rand(Float64,2*M)
         Xrand = sort(Xrand)
-        G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
+        if last(Xrand)>tf-dt
+            G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
+        end
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
     # CAREFUL perhaps this hypervolume has to be modified since the sampling method has changed
@@ -424,18 +420,18 @@ function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     # Non trivial step is to compute bath part as it scales horribly
     L = size(Xrand)[1]
     # Only inchworm proper contractions have to be taken into account
-    LBath = Compute_bathInch(Xrand, tf, dt, Bath)
+    LBath = Compute_bathInch(Xrand, tf, dt, Bath, t)
     # First part of the propagations is done separately
     # Now, as here I'm resummating, the Green function is no longer made up of bare propagators but rather on bold
     # ones
     Gp = Compute_bold(ti, tf, ti, Xrand[1], tf-dt, t, H0, O, G)
-    Gp = Gp * W
+    Gp = W * Gp
     for i in 2:L
-        Gp = Gp*Compute_bold(ti, tf, Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G)
-        Gp = Gp * W
+        Gp = Compute_bold(ti, tf, Xrand[i-1], Xrand[i], tf-dt, t, H0, O, G) * Gp
+        Gp = W * Gp
     end
     # Last part of the propagations is done separately
-    Gp = Gp* Compute_bold(ti, tf, last(Xrand), tf, tf-dt, t, H0, O, G)
+    Gp = Compute_bold(ti, tf, last(Xrand), tf, tf-dt, t, H0, O, G) * Gp
     # Now all boring prefactors have to be calculated
     prefact = 1im^L
     for i in 1:L
@@ -446,12 +442,13 @@ function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     return prefact*Gp*LBath
 end
 
-function Compute_bathInch(Xrand, tf, dt, Bath)
+function Compute_bathInch(Xrand, tf, dt, Bath, t)
     """
     Compute_bathInch computes the sum of possible factorizations that are Inchworm proper
     Xrand: sample of points
     tf,dt: time variables
     Bath: bath properties
+    t: physical time
     """
     N = size(Xrand)[1]
     Partition = Pairwise_partitions(N)
@@ -459,7 +456,7 @@ function Compute_bathInch(Xrand, tf, dt, Bath)
     Bath_influence = 0
     for i in 1:L
         if Is_Inch(Partition[i], Xrand, dt, tf)
-            Bath_influence += Compute_product(Xrand, Bath, Partition[i])
+            Bath_influence += Compute_product(Xrand, Bath, Partition[i], t)
         end
     end
     return Bath_influence
@@ -493,7 +490,7 @@ function Is_Inch(Partition, Xrand, dt, tf)
     end
 end
 
-function main(dt, t, H0, W, O, Bath, M, Nwlk)
+function main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
     """
     main functions just assembles everything
     dt: time step
@@ -501,6 +498,7 @@ function main(dt, t, H0, W, O, Bath, M, Nwlk)
     H0: Unperturbed Hamiltonian
     W: Perturbation
     O: observable
+    psi0: initial wavefunction (in matrix form)
     Bath: bath parameters
     M: order of diagrammatic expansion
     Nwlk: Number or walkers
@@ -509,24 +507,32 @@ function main(dt, t, H0, W, O, Bath, M, Nwlk)
     G = []
     for i in 1:Nsims
         push!(G, InchDiag_MC(i*dt,dt,H0,W,O,Bath,M,Nwlk))
+        println(i)
     end
-    return G
+    Obs= []
+    L = size(G)[1]
+    for i in 1:L
+        push!(Obs, real(tr(psi0*G[i])))
+        println(real(tr(psi0*G[i])))
+    end
+    return Obs
 end
 
 
-t=1
+t=2
 dt = 0.1
 H0 = zeros(2,2)
-H0[1,1] = 0.5
-H0[1,2] = 0.1
-H0[2,1] = 0.1
-H0[2,2] = -0.5
+H0[1,2] = 1
+H0[2,1] = 1
 W = zeros(2,2)
-W[1,1] = 0.5
-W[2,2] = -0.5
+W[1,1] = 1
+W[2,2] = -1
 O = W
 M=1
-Nwlk = 100
-Bath=[1,1,1]
-G=main(dt, t, H0, W, O, Bath, M, Nwlk)
-
+psi0 = zeros(2,2)
+psi0[1,1] = 1
+Nwlk = 300
+Bath=[1,5,0.5]
+L=main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
+filename="B.txt"
+writedlm(filename,L)
