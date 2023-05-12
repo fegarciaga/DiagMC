@@ -32,13 +32,13 @@ function Compute_bold(ti, tf, si, sf, sup, t, H0, O, G)
     G: Collection of previously computed Green's functions
     """
     if si<=sf && sf<=sup
-        return Compute_G(sf, si, tf, ti, G)
+        return Compute_G(sf, si, tf, ti, t, O, G)
     elseif sup< si && si<=sf
         return Compute_bare(H0, si, sf, t, O)
     else       
         # In this case no interpolation is needed as the bold propagator is evaluated exactly at a point were it was
         # computed previously
-        return Compute_bare(H0, sup, sf, t, O)*Compute_Gex(sup, si, G)
+        return Compute_bare(H0, sup, sf, t, O)*Interpolate_Gf(si, sup, dt, t, O, G)
     end
 end
 
@@ -49,7 +49,7 @@ function Compute_Gex(sup, si, G)
     return Access(G,iint,fint)
 end
 
-function Compute_G(sf, si, tf, ti, G)
+function Compute_G(sf, si, tf, ti, t, O, G)
     """
     Compute_G performs the interpolation of bold Green's functions. Three cases must be distinguished
     sf, si: Keldysh time arguments of desired Green function interpolation
@@ -57,15 +57,15 @@ function Compute_G(sf, si, tf, ti, G)
     G: array of previously computed Green's functions
     """
     if abs(si-ti)<1e-8
-        return Interpolate_Gi(si, sf, dt, G)
+        return Interpolate_Gi(si, sf, dt, t, O, G)
     elseif abs(sf-tf)<1e-8
-        return Interpolate_Gf(si, sf, dt, G)
+        return Interpolate_Gf(si, sf, dt, t, O, G)
     else
-        return Interpolate_G(si, sf, dt, G)
+        return Interpolate_G(si, sf, dt, t, O, G)
     end
 end
 
-function Interpolate_G(si, sf, dt, G)
+function Interpolate_G(si, sf, dt, t, O, G)
     """
     Interpolate_G: compute the interpolation of bold Green function used for inchworm calculations
     si,sf: Keldysh contour time values
@@ -81,7 +81,7 @@ function Interpolate_G(si, sf, dt, G)
     di = si-dt*(iint-1)
     df = sf-dt*(fint-1)
 
-    return Access(G,iint,fint)+di*(Access(G,iint+1,fint)-Access(G,iint,fint))+df*(Access(G,iint,fint+1)-Access(G,iint,fint))+di*df*(Access(G,iint+1,fint+1)-Access(G,iint+1,fint)-Access(G,iint,fint+1)+Access(G,iint,fint))
+    return Access(G,iint,fint)+di/dt*(Access(G,iint+1,fint)-Access(G,iint,fint))+df/dt*(Access(G,iint,fint+1)-Access(G,iint,fint))+di*df*(Access(G,iint+1,fint+1)-Access(G,iint+1,fint)-Access(G,iint,fint+1)+Access(G,iint,fint))
 end
 
 function Access(G,iint, fint)
@@ -90,7 +90,7 @@ function Access(G,iint, fint)
     return G[mint1+mint2]
 end
 
-function Interpolate_Gi(si, sf, dt, G)
+function Interpolate_Gi(si, sf, dt, t, O, G)
     """
     Interpolate_Gi: computes the interpolation in the particular case where the initial point is the fisrt point in the interval
     si,sf: Keldysh time values
@@ -100,10 +100,21 @@ function Interpolate_Gi(si, sf, dt, G)
     fint= floor(Int,sf/dt)+1
     df = sf-dt*(fint-1)
 
-    return Access(G,1,fint)+df*(Access(G,1,fint+1)-Access(G,1,fint))
+    # If the interpolation has to use the point were the contour folds attention has to be put
+
+    tint = floor(Int, t/dt)+1
+
+    if tint == fint+1
+        Gp = inv(O)*Access(G,1,fint+1)
+        G_inter = Access(G,1,fint)+df/dt*(Gp-Access(G,1,fint))
+    else
+        G_inter = Access(G, 1, fint)+df/dt*(Access(G,1,fint+1)-Access(G,1,fint))
+    end
+
+    return G_inter
 end
 
-function Interpolate_Gf(si, sf, dt, G)
+function Interpolate_Gf(si, sf, dt, t, O, G)
     """
     Interpolate_Gi: computes the interpolation in the particular case where the initial point is the last point in the interval
     si,sf: Keldysh time values
@@ -111,15 +122,26 @@ function Interpolate_Gf(si, sf, dt, G)
     G: array of Green's functions
     """
     iint= floor(Int,si/dt)+1
-    fint= floor(Int,sf/dt)+1
-    di = sf-dt*(fint-1)
+    fint= floor(Int,sf/dt)+1 
+    di = si-dt*(iint-1)
+    
+    # Again, same careful analysis has to be used 
+    
+    tint = floor(Int, t/dt)+1
 
-    return Access(G,iint,fint)+df*(Access(G,iint+1,fint)-Access(G,iint,fint))
+    if tint == iint
+        Gp = Access(G,iint,fint)*inv(O)
+        G_inter = Gp+di/dt*(Access(G,iint+1,fint)-Gp)
+    else
+        G_inter = Access(G,iint,fint)+di/dt*(Access(G,iint+1,fint)-Access(G,iint,fint))
+    end
+
+    return G_inter
 end
 
 function f(x,t1,t2,λ,ω,β)
     if x==0
-        y =1e-7
+        y =1e-14
         return λ/π*ω*y/(ω^2+y^2)*(coth(β*y/2)*cos(y*(t1-t2))-1im*sin(y*(t1-t2)))
     else
         return λ/π*ω*x/(ω^2+x^2)*(coth(β*x/2)*cos(x*(t1-t2))-1im*sin(x*(t1-t2)))
@@ -136,7 +158,7 @@ function B(t1,t2,Bath)
     Bath: array containing all previous parameters
     """
     λ, ω, β = Bath
-    integral, error = quadgk(x -> f(x,t1,t2,λ,ω,β), -20*ω, 20*ω)
+    integral, error = quadgk(x -> f(x,t1,t2,λ,ω,β), -50*ω, 50*ω)
     return integral
 end
 
@@ -185,12 +207,22 @@ function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, Nwlk)
         G_stoch += Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
-    V = (tf-ti)^(2*M)/(fac(2*M))
+    # This volume is trickier than it seems as several possible partitions (and thus integrals) are actually being computed
+    if ti<t && t<tf
+        # If the integral includes two parts of the contour several possible partitions have to be considered
+        V=0
+        for i in 0:2*M
+            V+= (t-ti)^i/fac(i)*(tf-t)^(2*M-i)/fac(2*M-i)
+        end
+    else
+        # If not the volume is simply calculated using a single hypervolume formula
+        V = (tf-ti)^(2*M)/(fac(2*M))
+    end
     return V*G_stoch/Nwlk
 end
 
 function fac(i)
-    if i ==1
+    if i ==0
         return 1
     else
         return i*fac(i-1)
@@ -275,7 +307,7 @@ function Compute_time(s,t)
     if s<t
         return s
     else
-        return s-t
+        return 2*t-s
     end
 end
 
@@ -325,6 +357,7 @@ function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
     # pre store array of Greens functions
     G = []
     Npar = 0
+    println(t)
     for tf in trange
         Npar = Npar+1
         tirange = range(tf,0,Npar)
@@ -380,7 +413,7 @@ function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     # First approximation to the new propagator is gonna be the previous computed Greens function + free propagator
     # Note that given the if statements of the previous function last stored Greens function is always gonna be the
     # right one
-    G_new = Compute_bare(H0, tf-dt, tf, t, O) * last(G)
+    G_new = Compute_bold(ti, tf, ti, tf, tf-dt, t, H0, O, G)
 
     # Now diagrammatic expansion has to be considered
     for i in 1:M
@@ -411,11 +444,20 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
         for i in 2:2*M
             Xrand[i]= ti+(tf-ti)*rand(Float64)
         end
+        Xrand = sort(Xrand)
         G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
     # CAREFUL perhaps this hypervolume has to be modified since the sampling method has changed
-    V = dt*(tf-ti)^(2*M-1)/(fac(2*M-1))
+    # Again the volume has to be computed for two different cases
+    if ti<t && t<tf
+        V=0
+        for i in 1:2*M
+            V+= ((tf-t)^(i)/fac(i)-(tf-t-dt)^(i)/fac(i))*(t-ti)^(2*M-i)/fac(2*M-i)
+        end
+    else
+        V = (tf-ti)^(2*M)/fac(2*M)-(tf-ti-dt)^(2*M)/fac(2*M)
+    end
     return V*G_stoch/Nwlk
 end
 
@@ -532,21 +574,22 @@ function main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
     return Obs
 end
 
-
 t=2
-dt = 0.1
+dt = 1/16
 H0 = zeros(2,2)
 H0[1,2] = 1
 H0[2,1] = 1
 W = zeros(2,2)
 W[1,1] = 1
 W[2,2] = -1
-O = W
+O = zeros(2,2)
+O[1,1]=1
+O[2,2]=-1
 M=1
 psi0 = zeros(2,2)
 psi0[1,1] = 1
 Nwlk = 300
-Bath=[1,5,0.5]
+Bath=[1,5,50]
 L=main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
 filename="B.txt"
 writedlm(filename,L)
