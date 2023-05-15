@@ -105,7 +105,7 @@ function Interpolate_Gi(si, sf, dt, t, O, G)
     tint = floor(Int, t/dt)+1
 
     if tint == fint+1
-        Gp = inv(O)*Access(G,1,fint+1)
+        Gp = Access(G,1,fint+1)*inv(O)
         G_inter = Access(G,1,fint)+df/dt*(Gp-Access(G,1,fint))
     else
         G_inter = Access(G, 1, fint)+df/dt*(Access(G,1,fint+1)-Access(G,1,fint))
@@ -130,7 +130,7 @@ function Interpolate_Gf(si, sf, dt, t, O, G)
     tint = floor(Int, t/dt)+1
 
     if tint == iint
-        Gp = Access(G,iint,fint)*inv(O)
+        Gp = Access(G,iint,fint)
         G_inter = Gp+di/dt*(Access(G,iint+1,fint)-Gp)
     else
         G_inter = Access(G,iint,fint)+di/dt*(Access(G,iint+1,fint)-Access(G,iint,fint))
@@ -158,11 +158,11 @@ function B(t1,t2,Bath)
     Bath: array containing all previous parameters
     """
     λ, ω, β = Bath
-    integral, error = quadgk(x -> f(x,t1,t2,λ,ω,β), -50*ω, 50*ω)
+    integral, error = quadgk(x -> f(x,t1,t2,λ,ω,β), 0, 50*ω)
     return integral
 end
 
-function MC_diag(ti, dt, t, H0, W, O, Bath, M, Nwlk)
+function MC_diag(ti, dt, t, H0, W, O, Bath, M, psi0, Nwlk)
     """
     MC_diag: performs diagrammatic expansion using bare procedure
     ti: Initial time
@@ -172,6 +172,7 @@ function MC_diag(ti, dt, t, H0, W, O, Bath, M, Nwlk)
     W: interaction
     O: Observable
     Bath: Bath parameters
+    psi0: initial density matrix
     Nwlk: Number of walkers
     M: order of diagrammatix expansion
     """
@@ -181,12 +182,12 @@ function MC_diag(ti, dt, t, H0, W, O, Bath, M, Nwlk)
     # Now stochastic approches have to be used to compute higher order terms
     for i in 1:M
         # For a given order diagrams are stochastically summed
-        G += Stochastic_sample(ti, tf, t, i, H0, W, O, Bath, Nwlk)
+        G += Stochastic_sample(ti, tf, t, i, H0, W, O, Bath, psi0, Nwlk)
     end
     return G
 end
 
-function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, Nwlk)
+function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, psi0, Nwlk)
     """
     Stochastic_sample: computes the integral of Dyson expansion using stochastic sample. Intervals are sampled using
     a regular grid.
@@ -197,14 +198,26 @@ function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, Nwlk)
     W: perturbation
     O: Observable
     Bath: bath observable
+    psi0: initial density matrix
     Nwlk: Number of sampling points
     """
     G_stoch = zeros(size(H0)[1],size(H0)[1])
+    # Initially just one random statring multidimensional array has to be sampled
+    # Here 2M random points on the interval tf-ti have to sampled
+    Xrand = ti.+(tf-ti).*rand(Float64, 2*M)
+    Xrand = sort(Xrand)
+    # In order to increase performance the initial probability is precomputed
+    Gpar =  Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
+    Pi = abs(tr(Gpar*psi0))
+    Norm_fact = 0
     for i in 1:Nwlk
-        # Here 2M random points on the interval ti-tf have to be sampled
-        Xrand = ti.+(tf-ti).*rand(Float64, 2*M)
-        Xrand = sort(Xrand)
-        G_stoch += Compute_propagator(ti,tf,t,Xrand,H0,W,O,Bath)
+        # Here 2M random points on the interval ti-tf have to be sample
+        # In order to improve the convergence of the integral Metropolis Hastings algorithm has to be implemented
+        # This will vary the array Xrand until it finds an optimal representation of the probability distribution 
+        # which is given by |O|
+        Xrandalt, P = Metropolis_Hasting(ti, tf, t, H0, W, O, Bath, Xrand, Pi, psi0)
+        G_stoch += Compute_propagator(ti,tf,t,Xrandalt,H0,W,O,Bath)/P
+        Norm_fact += 1/P
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
     # This volume is trickier than it seems as several possible partitions (and thus integrals) are actually being computed
@@ -218,9 +231,47 @@ function Stochastic_sample(ti, tf, t, M, H0, W, O, Bath, Nwlk)
         # If not the volume is simply calculated using a single hypervolume formula
         V = (tf-ti)^(2*M)/(fac(2*M))
     end
-    return V*G_stoch/Nwlk
+    Norm_fact/=Nwlk
+    return V*G_stoch/(Nwlk*Norm_fact)
 end
 
+function Metropolis_Hasting(ti, tf, t, H0, W, O, Bath, Xrand, Pi, psi0)
+    """
+    Metropolis_Hasting improve the stochastic representation by means of the Metropolis Hastings algortihm
+    ti,tf,t: time parameters
+    H0: Unperturbed Hamiltonian
+    W: Perturbation
+    O: Observable
+    Bath: Bath parameters
+    Xrand: Initial point for the random walk
+    Pi: associated probability density with the initial random point
+    """
+    Pold= Pi
+    Pnew = 0
+    # First thing to do is to propose a random walk
+    L = size(Xrand)[1]
+    Xrandold=Xrand
+    Xrandnew  = zeros(L)
+    for i in 1:50
+        drand = 10*dt.*(0.5.-rand(Float64,L))
+        Xrand1 = ti.+(mod.((Xrandold + drand).-ti, tf-ti))
+        Xrand1 = sort(Xrand1)
+        # once the new proposed state is has been computed probabilistic change is computed
+        coin_flip = rand(Float64)
+        Gnew = Compute_propagator(ti,tf,t,Xrand1,H0,W,O,Bath)
+        Pnew = abs(tr(Gnew*psi0))
+        if Pnew/Pold>1
+            Xrandold = Xrand1
+            Pold = Pnew
+        elseif coin_flip<=Pnew/Pold
+            Xrandnold = Xrand1
+            Pold = Pnew
+        end
+    end
+    # Return both the probability and the new sampling as the first one is used in Metropolis Hasting normalization
+    return Xrandold, Pold
+end
+    
 function fac(i)
     if i ==0
         return 1
@@ -291,8 +342,8 @@ function Compute_product(Xrand, Bath, Partition, t)
     G = 1
     for i in 1:L
         # time has to be properly fixed
-        t1 = Compute_time(Partition[i][1],t)
-        t2 = Compute_time(Partition[i][2],t)
+        t1 = Compute_time(Xrand[Partition[i][1]],t)
+        t2 = Compute_time(Xrand[Partition[i][2]],t)
         G *= B(t1,t2,Bath)
     end
     return G
@@ -338,7 +389,7 @@ function Pairwise_partitions(N)
     return B
 end
 
-function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
+function InchDiag_MC(t, dt, H0, W, O, Bath, M, psi0, Nwlk)
     """
     InchDiag_MC implements Inchworm diagrammatic Monte Carlo using original approach
     t: physical time
@@ -357,20 +408,19 @@ function InchDiag_MC(t, dt, H0, W, O, Bath, M, Nwlk)
     # pre store array of Greens functions
     G = []
     Npar = 0
-    println(t)
     for tf in trange
         Npar = Npar+1
         tirange = range(tf,0,Npar)
         for ti in tirange
             # Perform MC sampling using Inchworm algorithm
-            G_par = Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
+            G_par = Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, psi0, M, Nwlk)
             push!(G, G_par)
         end
     end
     return last(G)
 end
 
-function Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
+function Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, psi0, M, Nwlk)
     """
     Compute_Inchworm calculates the Greens function for a given pair of Keldysh contour times. Inchworm algorithm
     is used to compute such Greens functions avoiding sign problem. As a consecuence, a sample of Green's functions
@@ -390,15 +440,15 @@ function Compute_Inchworm(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
         return I(2)
     elseif abs(tf-ti-dt)<1e-8
         # For the first non trivial step, plain MC samplig has to be implemented
-        return MC_diag(ti, dt, t, H0, W, O, Bath, M, Nwlk)
+        return MC_diag(ti, dt, t, H0, W, O, Bath, M, psi0, Nwlk)
     else
         # This is the only case were new functions have to be implemented as Inchworm algorithm is implemented in
         # this part
-        return Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
+        return Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, psi0, Nwlk)
     end
 end
 
-function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
+function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, psi0, Nwlk)
     """
     Inchworm_expand performs the stochastic sample of the Inchworm part of the algorithm
     ti, tf: Keldysh contour time values
@@ -417,12 +467,12 @@ function Inchworm_expand(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
 
     # Now diagrammatic expansion has to be considered
     for i in 1:M
-        G_new = G_new + InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, i, Nwlk)
+        G_new = G_new + InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, psi0, i, Nwlk)
     end
     return G_new
 end
 
-function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
+function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, psi0, M, Nwlk)
     """
     InchM_sample performs an stochastic calcualtion for a given order of diagrammatic expansion
     ti, tf: Keldysh contour time values
@@ -435,17 +485,28 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     Nwlk: Number of MC samples
     """
     G_stoch = zeros(size(H0)[1],size(H0)[1])
+    Norm_fact =0
+    Xrand = zeros(2*M)
+    Xrand[1] = tf-dt+dt*rand(Float64)
+    for i in 2:2*M
+        Xrand[i]= ti+(tf-ti)*rand(Float64)
+    end
+    Gpar = Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
+    Pi = abs(tr(Gpar*psi0))
     for i in 1:Nwlk
         # Here 2M random points on the interval ti-tf have to be sampled
         # For the Inchworm procedure, the sampling process is a bit more complex as the sampling must ensure
         # Inchworm properness so at least the first point has to be sampled within the interval [tf-dt,tf]
-        Xrand = zeros(2*M)
-        Xrand[1] = tf-dt+dt*rand(Float64)
-        for i in 2:2*M
-            Xrand[i]= ti+(tf-ti)*rand(Float64)
-        end
-        Xrand = sort(Xrand)
-        G_stoch += Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
+        Gpar, P = Metropolis_Hasting_Inch(ti, tf, dt, t, H0, W, O, Bath, Xrand, Pi, psi0, G)
+        G_stoch += Gpar
+        Norm_fact += P
+        #Xrand = zeros(2*M)
+        #Xrand[1] = tf-dt+dt*rand(Float64)
+        #for i in 2:2*M
+        #    Xrand[i] = ti+(tf-ti)*rand(Float64)
+        #end
+        #Xrand = sort(Xrand)
+        #G_stoch += Compute_Inchpropagator(ti,tf,dt,t,Xrand,H0,W,O,G,Bath)
     end
     # besides the average the integral value has to be corrected by the volume of the hyperspace of integration
     # CAREFUL perhaps this hypervolume has to be modified since the sampling method has changed
@@ -453,12 +514,83 @@ function InchM_sample(ti, tf, dt, t, H0, W, O, G, Bath, M, Nwlk)
     if ti<t && t<tf
         V=0
         for i in 1:2*M
-            V+= ((tf-t)^(i)/fac(i)-(tf-t-dt)^(i)/fac(i))*(t-ti)^(2*M-i)/fac(2*M-i)
+            V+= dt*(tf-t)^(i-1)/fac(i-1)*(t-ti)^(2*M-i)/fac(2*M-i)
         end
     else
-        V = (tf-ti)^(2*M)/fac(2*M)-(tf-ti-dt)^(2*M)/fac(2*M)
+        V = dt*(tf-ti)^(2*M-1)/fac(2*M-1)
     end
-    return V*G_stoch/Nwlk
+    Norm_fact/=Nwlk
+    return V*G_stoch/(Nwlk*Norm_fact)
+end
+
+function Metropolis_Hasting_Inch(ti, tf, dt, t, H0, W, O, Bath, Xrand, Pi, psi0, G)
+    """
+    Metropolis_Hasting_Inch comptes the Metropolis samplign for the Inchworm algorithm
+    ti,tf,t,dt: time parameters
+    H0: Unperturbed Hamiltonian
+    W: perturbation
+    O: Observable
+    Bath: Bath parameters
+    Xrand: Initial sampled point
+    Pi: Initial probability
+    psi0: Initial density matrix
+    """
+    Pold=Pi
+    Pnew = 0
+    L = size(Xrand)[1]
+    Xrandold=Xrand
+    Xrandnew = zeros(L)
+
+    # First an equilibration part is computed
+    for i in 1:20
+        # displacement is build taking into account that the interval must remain Inchworm proper
+
+        drand = 10*dt.*(0.5.-rand(Float64,L))
+        drand[L]=(dt/5).*(0.5.-rand(Float64))
+        Xrand1 = zeros(L)
+        Xrand1= ti.+(mod.((Xrandold+drand).-ti,tf-ti))
+        Xrand1[L] = tf-dt+mod(Xrandold[L]+drand[L]-tf-dt,dt)
+        coin_flip = rand(Float64)
+        Gnew = Compute_Inchpropagator(ti,tf,dt,t,Xrand1,H0,W,O,G,Bath)
+        Pnew = abs(tr(Gnew*psi0))
+        if Pnew/Pold>1
+            Xrandolg=Xrand1
+            Pold=Pnew
+        elseif coin_flip<=Pnew/Pold
+            Xrandold = Xrand1
+            Pold=Pnew            
+        end
+    end
+
+    Lop = size(H0)[1]
+    Gpar = zeros(Lop, Lop)
+    Ppar = 0
+
+    # Now Equilibration is computed 
+    for i in 1:30
+        drand = 10*dt.*(0.5.-rand(Float64,L))
+        drand[L]=(dt/5).*(0.5.-rand(Float64))
+        Xrand1 = zeros(L)
+        Xrand1= ti.+(mod.((Xrandold+drand).-ti,tf-ti))
+        Xrand1[L] = tf-dt+mod(Xrandold[L]+drand[L]-tf-dt,dt)
+        coin_flip = rand(Float64)
+        Gnew = Compute_Inchpropagator(ti,tf,dt,t,Xrand1,H0,W,O,G,Bath)
+        Pnew = abs(tr(Gnew*psi0))
+        if Pnew/Pold>1
+            Xrandolg=Xrand1
+            Pold=Pnew
+        elseif coin_flip<=Pnew/Pold
+            Xrandold = Xrand1
+            Pold=Pnew            
+        end
+        Gpar += Compute_Inchpropagator(ti,tf,dt,t,Xrandold,H0,W,O,G,Bath)/Pold
+        Ppar += 1/Pold
+    end
+
+    Gpar /=30
+    Ppar /=30
+
+    return Gpar, Ppar
 end
 
 function Compute_Inchpropagator(ti, tf, dt, t, Xrand, H0, W, O, G, Bath)
@@ -562,20 +694,21 @@ function main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
     Nsims = floor(Int,t/dt)
     G = []
     for i in 1:Nsims
-        push!(G, InchDiag_MC(i*dt,dt,H0,W,O,Bath,M,Nwlk))
+        push!(G, InchDiag_MC(i*dt,dt,H0,W,O,Bath,M,psi0,Nwlk))
         println(i)
     end
     Obs= []
     L = size(G)[1]
     for i in 1:L
         push!(Obs, real(tr(psi0*G[i])))
-        println(real(tr(psi0*G[i])))
+        println(real(tr(psi0*G[i])),"\t",i*dt)
+        #println(G[i])
     end
     return Obs
 end
 
-t=2
-dt = 1/16
+t=4
+dt = 1/8
 H0 = zeros(2,2)
 H0[1,2] = 1
 H0[2,1] = 1
@@ -588,8 +721,8 @@ O[2,2]=-1
 M=1
 psi0 = zeros(2,2)
 psi0[1,1] = 1
-Nwlk = 300
-Bath=[1,5,50]
+Nwlk = 100
+Bath=[0.1,5,0.5]
 L=main(dt, t, H0, W, O, psi0, Bath, M, Nwlk)
 filename="B.txt"
 writedlm(filename,L)
